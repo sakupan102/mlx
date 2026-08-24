@@ -381,12 +381,13 @@ MTL::ComputePipelineState* get_fused_all_reduce_kernel(
     const auto out_type = get_type_string(out.dtype());
     source += get_template_definition(
         kernel_name,
-        "fused_all_reduce",
+        "all_reduce",
         get_type_string(in.dtype()),
         out_type,
         op_type + "<" + out_type + ">",
-        prefix_name,
-        "int64_t");
+        "int64_t",
+        REDUCE_N_READS,
+        prefix_name);
     return source;
   });
   return d.get_kernel(kernel_name, lib);
