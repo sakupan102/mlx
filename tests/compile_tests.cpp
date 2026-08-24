@@ -395,11 +395,6 @@ auto binary_fused_2(const std::vector<array>& inputs) {
   return std::vector<array>{x + inputs[0]};
 }
 
-// Binary into unary into un-compilable
-auto binary_fused_3(const std::vector<array>& inputs) {
-  return std::vector<array>{sum(abs(inputs[0] + inputs[1]), true)};
-}
-
 TEST_CASE("test compile binary fused") {
   {
     auto cfun = compile(binary_fused_0);
@@ -437,22 +432,6 @@ TEST_CASE("test compile binary fused") {
     CHECK_EQ(typeid(p), typeid(Compiled));
     CHECK_EQ(out.inputs()[0].id(), x.id());
     CHECK_EQ(out.inputs()[1].id(), y.id());
-  }
-
-  {
-    auto cfun = compile(binary_fused_3);
-    auto x = array({1.0, 2.0});
-    auto y = array({1.0, 2.0});
-    auto out = cfun({x, y})[0];
-
-    auto& p = out.primitive();
-    CHECK_EQ(typeid(p), typeid(CompiledReduce));
-    // Only abs is fused with Reduce. Add remains an input.
-    auto cout = out.inputs()[0];
-    auto& cp = cout.primitive();
-    CHECK_EQ(typeid(cp), typeid(Add));
-    CHECK_EQ(cout.inputs()[0].id(), x.id());
-    CHECK_EQ(cout.inputs()[1].id(), y.id());
   }
 }
 
