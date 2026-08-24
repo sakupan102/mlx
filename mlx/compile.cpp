@@ -181,17 +181,16 @@ std::pair<std::vector<array>, std::vector<int>> Compiled::vmap(
 
 bool Compiled::is_equivalent(const Primitive& other) const {
   const Compiled& a_other = static_cast<const Compiled&>(other);
-  return tape_.size() == a_other.tape_.size() &&
-      std::equal(
-             tape_.begin(),
-             tape_.end(),
-             a_other.tape_.begin(),
-             a_other.tape_.end(),
-             [](const array& a1, const array& a2) {
-               auto& p1 = a1.primitive();
-               auto& p2 = a2.primitive();
-               return typeid(p1) == typeid(p2) && p1.is_equivalent(p2);
-             });
+  return std::equal(
+      tape_.begin(),
+      tape_.end(),
+      a_other.tape_.begin(),
+      a_other.tape_.end(),
+      [](const array& a1, const array& a2) {
+        auto& p1 = a1.primitive();
+        auto& p2 = a2.primitive();
+        return typeid(p1) == typeid(p2) && p1.is_equivalent(p2);
+      });
 }
 
 const char* Compiled::name() const {
