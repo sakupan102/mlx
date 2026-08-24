@@ -138,7 +138,7 @@ std::string get_reduce_op_name(Reduce::ReduceType reduce_type) {
 
 void fused_all_reduce(
     cu::CommandEncoder& encoder,
-    const Reduce& reduce,
+    const CompiledReduce& compiled,
     const std::vector<array>& inputs,
     array& out,
     const Stream& stream) {
@@ -147,46 +147,17 @@ void fused_all_reduce(
   // Copied from all_reduce.cu
   constexpr int N_READS = 8;
 
-  const auto& prefix_inputs = reduce.prefix_inputs();
-  const auto& prefix_tape = reduce.prefix_tape();
-  const auto& prefix_constant_ids = reduce.prefix_constant_ids();
+  const auto& prefix_inputs = compiled.inputs();
+  const auto& tape = compiled.tape();
+  std::vector<array> prefix_tape(tape.begin(), tape.end() - 1);
+  const auto& prefix_constant_ids = compiled.constant_ids();
+  const auto& reduce = static_cast<const Reduce&>(tape.back().primitive());
 
   auto is_constant = [&](size_t i) -> bool {
     return prefix_constant_ids.count(prefix_inputs[i].id()) > 0;
   };
 
-  NodeNamer namer;
-  std::ostringstream os;
-  std::ostringstream constant_hasher;
-
-  for (const auto& x : prefix_inputs) {
-    namer.get_name(x);
-  }
-
-  // Build string from tape operations
-  for (const auto& a : prefix_tape) {
-    os << namer.get_name(a) << kindof(a.dtype()) << a.itemsize();
-    os << a.primitive().name();
-    for (const auto& inp : a.inputs()) {
-      os << namer.get_name(inp);
-    }
-  }
-  // Name the kernel: similar to Compiled::Compiled kernel naming
-  for (size_t i = 0; i < prefix_inputs.size(); ++i) {
-    const auto& x = prefix_inputs[i];
-    if (is_constant(i)) {
-      os << "C";
-      print_constant(constant_hasher, x);
-    } else {
-      os << (is_scalar(x) ? "S" : "V");
-    }
-  }
-
-  os << get_reduce_op_name(reduce.state().first);
-  os << dtype_to_cuda_type(prefix_inputs[0].dtype());
-  os << std::hash<std::string>{}(constant_hasher.str());
-
-  std::string kernel_name = os.str();
+  std::string kernel_name = compiled.lib_name() + "_fused_reduce";
 
   out.set_data(cu::malloc_async(out.nbytes(), encoder));
 
@@ -332,14 +303,14 @@ void fused_all_reduce(
 
 void fused_reduce(
     cu::CommandEncoder& encoder,
-    const Reduce& reduce,
+    const CompiledReduce& compiled,
     const std::vector<array>& inputs,
     array& out,
     const std::vector<int>& axes,
     const ReductionPlan& plan,
     const Stream& stream) {
   if (plan.type == ContiguousAllReduce) {
-    fused_all_reduce(encoder, reduce, inputs, out, stream);
+    fused_all_reduce(encoder, compiled, inputs, out, stream);
     return;
   }
 

@@ -307,15 +307,15 @@ std::pair<Dtype, Dtype> remap_reduce_types(
 
 MTL::ComputePipelineState* get_fused_all_reduce_kernel(
     metal::Device& d,
-    const Reduce& reduce,
+    const CompiledReduce& compiled,
     const array& in,
     const array& out,
     const std::string& op_name) {
-  const auto& prefix_inputs = reduce.prefix_inputs();
-  const auto& prefix_tape = reduce.prefix_tape();
-  const auto& constant_ids = reduce.prefix_constant_ids();
+  const auto& prefix_inputs = compiled.inputs();
+  const auto& tape = compiled.tape();
+  const auto& constant_ids = compiled.constant_ids();
 
-  if (prefix_inputs.size() != 1 || prefix_tape.empty()) {
+  if (prefix_inputs.size() != 1 || tape.size() < 2) {
     throw std::runtime_error(
         "Fused Metal all-reduce currently requires one prefix input");
   }
@@ -324,34 +324,7 @@ MTL::ComputePipelineState* get_fused_all_reduce_kernel(
     return constant_ids.count(prefix_inputs[i].id()) > 0;
   };
 
-  NodeNamer namer;
-  std::ostringstream signature;
-  for (const auto& x : prefix_inputs) {
-    namer.get_name(x);
-  }
-  for (const auto& x : prefix_tape) {
-    signature << namer.get_name(x) << kindof(x.dtype()) << x.itemsize();
-    signature << x.primitive().name();
-    for (const auto& input : x.inputs()) {
-      signature << namer.get_name(input);
-    }
-  }
-  for (size_t i = 0; i < prefix_inputs.size(); ++i) {
-    const auto& x = prefix_inputs[i];
-    if (is_constant(i)) {
-      signature << "C";
-      print_constant(signature, x);
-    } else {
-      signature << (is_scalar(x) ? "S" : "V");
-    }
-    signature << kindof(x.dtype()) << x.itemsize();
-  }
-  signature << op_name << kindof(out.dtype()) << out.itemsize();
-
-  std::ostringstream name;
-  name << "fused_all_reduce_" << std::hex
-       << std::hash<std::string>{}(signature.str());
-  const std::string kernel_name = name.str();
+  const std::string kernel_name = compiled.lib_name() + "_fused_all_reduce";
   const std::string prefix_name = kernel_name + "_prefix";
 
   auto lib = d.get_library(kernel_name, [&]() {
@@ -364,7 +337,7 @@ MTL::ComputePipelineState* get_fused_all_reduce_kernel(
 
     NodeNamer source_namer;
     source += "struct " + prefix_name + " {\n";
-    source += "  " + get_type_string(prefix_tape.back().dtype()) +
+    source += "  " + get_type_string(tape[tape.size() - 2].dtype()) +
         " operator()(" + get_type_string(prefix_inputs[0].dtype()) +
         " val) thread {\n";
 
@@ -383,7 +356,8 @@ MTL::ComputePipelineState* get_fused_all_reduce_kernel(
       }
     }
 
-    for (const auto& x : prefix_tape) {
+    for (auto it = tape.begin(); it != tape.end() - 1; ++it) {
+      const auto& x = *it;
       const auto& xname = source_namer.get_name(x);
       source += "    " + get_type_string(x.dtype()) + " tmp_" + xname + " = ";
       if (is_static_cast(x.primitive())) {
@@ -399,7 +373,7 @@ MTL::ComputePipelineState* get_fused_all_reduce_kernel(
       }
     }
 
-    source += "    return tmp_" + source_namer.get_name(prefix_tape.back()) +
+    source += "    return tmp_" + source_namer.get_name(tape[tape.size() - 2]) +
         ";\n  }\n};\n";
 
     std::string op_type = op_name;
@@ -542,11 +516,11 @@ void fused_all_reduce_dispatch(
     const array& in,
     array& out,
     const std::string& op_name,
-    const Reduce& reduce,
+    const CompiledReduce& compiled,
     CommandEncoder& compute_encoder,
     metal::Device& d,
     const Stream& s) {
-  auto kernel = get_fused_all_reduce_kernel(d, reduce, in, out, op_name);
+  auto kernel = get_fused_all_reduce_kernel(d, compiled, in, out, op_name);
   all_reduce_dispatch_impl(
       in, out, op_name, out.dtype(), kernel, compute_encoder, d, s);
 }
@@ -1118,7 +1092,7 @@ void Reduce::eval_gpu(const std::vector<array>& inputs, array& out) {
   // When all the reduced axes have size 1 at runtime, which can happen with
   // shapeless compilation, the reduction is the identity so just cast-copy
   // the input to the output.
-  if (!has_fused_prefix() && in.size() > 0 && out.size() == in.size()) {
+  if (in.size() > 0 && out.size() == in.size()) {
     CopyType ctype =
         in.flags().contiguous ? CopyType::Vector : CopyType::General;
     copy_gpu(in, out, ctype, stream());
@@ -1174,18 +1148,6 @@ void Reduce::eval_gpu(const std::vector<array>& inputs, array& out) {
       plan = get_reduction_plan(in, axes_);
     }
 
-    if (has_fused_prefix()) {
-      if (plan.type == ContiguousAllReduce) {
-        fused_all_reduce_dispatch(
-            in, out, op_name, *this, compute_encoder, d, s);
-        return;
-      }
-
-      // TODO: Add fused prefix support to Metal row and strided reductions.
-      throw std::runtime_error(
-          "Fused Metal reduce is only implemented for contiguous all-reduce");
-    }
-
     // Reducing over everything and the data is all there no broadcasting or
     // slicing etc.
     if (plan.type == ContiguousAllReduce) {
@@ -1214,6 +1176,65 @@ void Reduce::eval_gpu(const std::vector<array>& inputs, array& out) {
   else {
     init_reduce(out, op_name, compute_encoder, d, s);
   }
+}
+
+void CompiledReduce::eval_gpu(
+    const std::vector<array>& inputs,
+    std::vector<array>& outputs) {
+  assert(inputs.size() == 1);
+  assert(outputs.size() == 1);
+
+  const auto& reduce = static_cast<const Reduce&>(tape().back().primitive());
+  auto [reduce_type, axes] = reduce.state();
+  array in = inputs[0];
+  auto& out = outputs[0];
+
+  size_t min_bytes = std::max(out.nbytes(), 4ul);
+  out.set_data(allocator::malloc(min_bytes));
+
+  std::string op_name;
+  switch (reduce_type) {
+    case Reduce::And:
+      op_name = "and";
+      break;
+    case Reduce::Or:
+      op_name = "or";
+      break;
+    case Reduce::Sum:
+      op_name = "sum";
+      break;
+    case Reduce::Prod:
+      op_name = "prod";
+      break;
+    case Reduce::Min:
+      op_name = out.dtype() == bool_ ? "and" : "min";
+      break;
+    case Reduce::Max:
+      op_name = out.dtype() == bool_ ? "or" : "max";
+      break;
+  }
+
+  auto& s = stream();
+  auto& d = metal::device(s.device);
+  auto& compute_encoder = metal::get_command_encoder(s);
+  if (in.size() == 0) {
+    init_reduce(out, op_name, compute_encoder, d, s);
+    return;
+  }
+
+  auto plan = get_reduction_plan(in, axes);
+  if (plan.type == GeneralReduce) {
+    array in_copy = contiguous_copy_gpu(in, s);
+    compute_encoder.add_temporary(in_copy);
+    in = in_copy;
+    plan = get_reduction_plan(in, axes);
+  }
+
+  if (plan.type != ContiguousAllReduce) {
+    throw std::runtime_error(
+        "Fused Metal reduce is only implemented for contiguous all-reduce");
+  }
+  fused_all_reduce_dispatch(in, out, op_name, *this, compute_encoder, d, s);
 }
 
 } // namespace mlx::core

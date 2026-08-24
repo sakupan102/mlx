@@ -659,6 +659,18 @@ class MLX_API Compiled : public Primitive {
     return kernel_lib_;
   }
 
+  const std::vector<array>& inputs() const {
+    return inputs_;
+  }
+
+  const std::vector<array>& tape() const {
+    return tape_;
+  }
+
+  const std::unordered_set<uintptr_t>& constant_ids() const {
+    return constant_ids_;
+  }
+
  private:
   const std::vector<array> inputs_;
   const std::vector<array> outputs_;
@@ -668,6 +680,23 @@ class MLX_API Compiled : public Primitive {
 
   mutable std::string name_;
   std::string kernel_lib_;
+};
+
+class MLX_API CompiledReduce final : public Compiled {
+ public:
+  explicit CompiledReduce(
+      Stream stream,
+      std::vector<array> inputs,
+      std::vector<array> outputs,
+      std::vector<array> tape,
+      std::unordered_set<uintptr_t> constant_ids);
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  std::vector<Shape> output_shapes(const std::vector<array>& inputs) override;
 };
 
 class Concatenate : public UnaryPrimitive {
@@ -1848,39 +1877,9 @@ class MLX_API Reduce : public UnaryPrimitive {
     return {reduce_type_, axes_};
   };
 
-  void set_fused_prefix(
-      std::vector<array> tape,
-      std::vector<array> inputs,
-      std::unordered_set<uintptr_t> constant_ids) {
-    prefix_tape_ = std::move(tape);
-    prefix_inputs_ = std::move(inputs);
-    prefix_constant_ids_ = std::move(constant_ids);
-  }
-
-  bool has_fused_prefix() const {
-    return !prefix_tape_.empty();
-  }
-
-  const std::vector<array>& prefix_tape() const {
-    return prefix_tape_;
-  }
-
-  const std::vector<array>& prefix_inputs() const {
-    return prefix_inputs_;
-  }
-
-  const std::unordered_set<uintptr_t>& prefix_constant_ids() const {
-    return prefix_constant_ids_;
-  }
-
  private:
   ReduceType reduce_type_;
   std::vector<int> axes_;
-
-  // Fused prefix storage
-  std::vector<array> prefix_tape_;
-  std::vector<array> prefix_inputs_;
-  std::unordered_set<uintptr_t> prefix_constant_ids_;
 };
 
 class Round : public UnaryPrimitive {

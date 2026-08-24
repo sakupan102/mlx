@@ -70,7 +70,7 @@ void init_reduce(
 
 void fused_reduce(
     cu::CommandEncoder& encoder,
-    const Reduce& reduce,
+    const CompiledReduce& compiled,
     const std::vector<array>& inputs,
     array& out,
     const std::vector<int>& axes,

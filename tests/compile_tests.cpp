@@ -294,6 +294,12 @@ auto unary_fused_3(const std::vector<array>& inputs) {
   return std::vector<array>{exp(abs(negative(sum(inputs[0], true))))};
 }
 
+auto unary_fused_reduction_with_prefix_output(
+    const std::vector<array>& inputs) {
+  auto x = abs(inputs[0]);
+  return std::vector<array>{x, sum(exp(x), true)};
+}
+
 TEST_CASE("test compile unary fused") {
   // NB: some of these tests are brittle and may need to be
   // updated if we change compile conditions
@@ -327,12 +333,10 @@ TEST_CASE("test compile unary fused") {
     CHECK_EQ(out.size(), 1);
 
     auto& p = out[0].primitive();
-    // Unary ops are fused into the Reduce primitive
-    CHECK_EQ(typeid(p), typeid(Reduce));
-    auto cout = out[0].inputs()[0];
-    auto& reduce = static_cast<Reduce&>(p);
-    CHECK(reduce.has_fused_prefix());
-    // The input to Reduce is directly x (not a Compiled primitive)
+    CHECK_EQ(typeid(p), typeid(CompiledReduce));
+    auto& compiled = static_cast<CompiledReduce&>(p);
+    auto& terminal = compiled.tape().back().primitive();
+    CHECK_EQ(typeid(terminal), typeid(Reduce));
     CHECK_EQ(out[0].inputs()[0].id(), x.id());
   }
 
@@ -348,6 +352,21 @@ TEST_CASE("test compile unary fused") {
     auto& sp = sout.primitive();
     CHECK_EQ(typeid(sp), typeid(Reduce));
     CHECK_EQ(sout.inputs()[0].id(), x.id());
+  }
+
+  {
+    auto cfun = compile(unary_fused_reduction_with_prefix_output);
+    auto x = array({1.0, -2.0});
+    auto out = cfun({x});
+
+    auto& prefix_output = out[0].primitive();
+    auto& reduction_output = out[1].primitive();
+    CHECK_EQ(typeid(prefix_output), typeid(Abs));
+    CHECK_EQ(typeid(reduction_output), typeid(CompiledReduce));
+    CHECK_EQ(out[1].inputs()[0].id(), out[0].id());
+    auto expected = unary_fused_reduction_with_prefix_output({x});
+    CHECK(allclose(out[0], expected[0]).item<bool>());
+    CHECK(allclose(out[1], expected[1]).item<bool>());
   }
 
   // Is equivalent works
@@ -427,9 +446,8 @@ TEST_CASE("test compile binary fused") {
     auto out = cfun({x, y})[0];
 
     auto& p = out.primitive();
-    CHECK_EQ(typeid(p), typeid(Reduce));
-    // With fused-into-reduction, only unary ops (abs) are fused into Reduce
-    // The binary op (Add) remains as the input to fused reduce + abs
+    CHECK_EQ(typeid(p), typeid(CompiledReduce));
+    // Only abs is fused with Reduce. Add remains an input.
     auto cout = out.inputs()[0];
     auto& cp = cout.primitive();
     CHECK_EQ(typeid(cp), typeid(Add));
@@ -899,6 +917,18 @@ TEST_CASE("test compile unary reduction two passes") {
   auto expected = fun({in})[0];
   auto out = compile(fun)({in})[0];
   CHECK(array_equal(out, expected).item<bool>());
+}
+
+TEST_CASE("test compile partial reduction") {
+  auto fun = [](const std::vector<array>& inputs) {
+    return std::vector<array>{max(abs(inputs[0]), 1, true)};
+  };
+  auto x = reshape(array({1.0f, -2.0f}), {1, 2});
+  auto out = compile(fun)({x})[0];
+
+  auto& primitive = out.primitive();
+  CHECK_EQ(typeid(primitive), typeid(Reduce));
+  CHECK(array_equal(out, fun({x})[0]).item<bool>());
 }
 
 TEST_CASE("test compile unary+constant reduction two passes") {
