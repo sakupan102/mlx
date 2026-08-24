@@ -12,7 +12,6 @@ namespace mlx::core {
 
 void Reduce::eval_gpu(const std::vector<array>& inputs, array& out) {
   nvtx3::scoped_range r("Reduce::eval_gpu");
-
   assert(inputs.size() == 1);
   array in = inputs[0];
 
